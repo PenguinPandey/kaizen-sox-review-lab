@@ -44,46 +44,6 @@ The **Home** page checks these live from the data rather than stating them:
 - **Blackline and Kyriba get higher scrutiny**: all 105 accounts get two reviewers, exceptions are capped at 90 days, and approval needs VP level or above.
 - **GitHub prod-DB flagged**: rule R04 (Critical) flags every developer who holds both code-write and production-database read.
 
-## Running it
-
-**Just open it.** Double-click `index.html`. It works from `file://` because data is loaded as plain `.js` files (browsers block `fetch()` of JSON from `file://`, so none is used).
-
-Or serve the folder locally:
-
-```bash
-python -m http.server 8000
-```
-
-then browse to `http://localhost:8000`.
-
-Your decisions, checklist ticks, sign-offs and exceptions are saved in your browser's `localStorage`. Nothing is sent anywhere.
-
-## Putting it on GitHub (no backend needed)
-
-1. On GitHub, create a new **empty** repository, for example `kaizen-access-review-lab` (public, so Pages is free).
-2. Click **Add file > Upload files**.
-3. Open this folder on your computer, select **everything inside it** (not the folder itself) and drag it into the upload page. GitHub keeps the sub-folders. The repo is 28 files, well under the 100-file limit for one upload.
-4. Commit to `main`.
-5. Go to **Settings > Pages**, set **Source: Deploy from a branch**, branch **main**, folder **/ (root)**, and save.
-6. After a minute the site is live at `https://<your-user>.github.io/<repo-name>/`.
-
-Notes:
-
-- The `.nojekyll` file is optional but stops GitHub from running Jekyll over the site. If your file manager hides dot-files and it does not upload, the site still works.
-- The footer links to `README`, `HLD` and `LLD` on GitHub once the site is hosted on `github.io`.
-
-## Regenerating or changing the data
-
-```bash
-python tools/generate_data.py     # rewrites data/people.js (deterministic, seed 15)
-python tools/validate_data.py     # independent Python check of the counts and structure
-```
-
-Change the seed or the planted issues in `tools/generate_data.py`. Roles, SoD rules, capabilities and compensating controls live in `data/reference.js`; checklist, criteria, workflow and retention text live in `data/process.js`. No build step is needed after editing: refresh the page.
-
-## Tests
-
-Open `tests.html` in a browser. It runs 57 checks against the same engine the site uses: SHA-256 and CRC against known vectors, account totals, SoD detection, reviewer-assignment invariants, guard rails, exception rules, retention dates and ZIP structure. Every line should be green.
 
 ## Design documents
 
