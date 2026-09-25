@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Engine tests</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font: 14px/1.5 system-ui, sans-serif; max-width: 860px; margin: 24px auto; padding: 0 16px; }
+  .ok { color: #1a7f37; } .bad { color: #b42318; font-weight: 600; }
+  li { list-style: none; margin: 2px 0; } h1 { font-size: 20px; }
+  #sum { font-weight: 700; margin: 12px 0; }
+</style>
+</head>
+<body>
+<h1>Engine tests</h1>
+<p>Runs the same engine the site uses. Open this file in a browser; every line should be green.</p>
+<div id="sum"></div>
+<ul id="out"></ul>
+<script src="data/reference.js"></script>
+<script src="data/process.js"></script>
+<script src="data/people.js"></script>
+<script src="js/util.js"></script>
+<script src="js/engine.js"></script>
+<script>
+(function () {
+  var U = KAI.util, E = KAI.E, pass = 0, fail = 0, out = document.getElementById("out");
+  function t(name, cond, detail) {
+    var li = document.createElement("li");
+    li.className = cond ? "ok" : "bad";
+    li.textContent = (cond ? "PASS  " : "FAIL  ") + name + (detail ? "  [" + detail + "]" : "");
+    out.appendChild(li);
+    cond ? pass++ : fail++;
+  }
+  KAI.state = {exceptions: []};
+  E.init();
+
+  /* util */
+  t("SHA-256 of empty string", U.sha256("") === "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  t("SHA-256 of 'abc'", U.sha256("abc") === "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  var long = new Array(1000).join("The quick brown fox ");
+  var ref = "";
+  t("SHA-256 handles multi-block input", U.sha256(long).length === 64);
+  if (window.crypto && crypto.subtle) {
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(long)).then(function (buf) {
+      var hex = Array.prototype.map.call(new Uint8Array(buf), function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
+      t("SHA-256 matches WebCrypto on 19 KB input", hex === U.sha256(long));
+      summary();
+    });
+  }
+  t("CRC32 of '123456789'", U.crc32(new TextEncoder().encode("123456789")) === 0xcbf43926);
+  t("Date helpers", U.daysBetween("2026-09-30", "2026-12-31") === 92 && U.addYears("2026-09-30", 7) === "2033-09-30");
+
+  /* population */
+  var st = E.stats();
+  t("Oracle EBS has 340 accounts", st.bySys.EBS.accounts === 340);
+  t("Blackline has 80 accounts", st.bySys.BL.accounts === 80);
+  t("Kyriba has 25 accounts", st.bySys.KY.accounts === 25);
+  t("GitHub has 60 accounts", st.bySys.GH.accounts === 60);
+  t("505 accounts in total", st.accounts === 505);
+
+  /* rules are transactions, not vague roles */
+  var rules = E.ref.sodRules;
+  t("At least 10 SoD rules", rules.length >= 10, rules.length + " rules");
+  t("Every rule names concrete capabilities with a transaction path", rules.every(function (r) {
+    return r.a.concat(r.b).every(function (c) { return E.ref.capabilities[c] && E.ref.capabilities[c].txn; }) && r.example && r.risk;
+  }));
+  t("Required three (post+approve JE, create+pay vendor, provision+approve access) exist", ["R01", "R02", "R03"].every(function (id) { return E.rules[id] && E.rules[id].required; }));
+  t("Every role's capabilities exist", E.ref.roles.every(function (r) { return r.caps.every(function (c) { return E.ref.capabilities[c]; }); }));
+
+  /* SoD detection */
+  function n(rule) { return E.findings.filter(function (f) { return f.ruleId === rule; }).length; }
+  t("R01 journal post+approve found", n("R01") === 3, n("R01"));
+  t("R02 vendor create+pay found", n("R02") === 2, n("R02"));
+  t("R03 provision+approve access found", n("R03") === 1, n("R03"));
+  t("R04 developer + prod-DB flagged for 8 developers", n("R04") === 8, n("R04"));
+  t("R08 Blackline prepare+approve found", n("R08") === 4, n("R08"));
+  t("R09/R10/R14 Kyriba conflicts found", n("R09") === 1 && n("R10") === 1 && n("R14") === 1);
+  t("R11 cross-system payment conflict found", n("R11") === 2, n("R11"));
+  t("Cross-system findings are attached to accounts in both systems", E.findings.filter(function (f) { return f.ruleId === "R11"; }).every(function (f) { return f.systems.length === 2; }));
+  t("No SoD finding for anyone who already left", E.findings.every(function (f) { return f.kind !== "sod" || E.people[f.personId].status === "Active"; }));
+
+  /* flags */
+  function k(kind) { return E.findings.filter(function (f) { return f.kind === kind; }).length; }
+  t("Leavers with active accounts detected", k("leaver") >= 15, k("leaver"));
+  t("Expired contractors detected", k("contractor") >= 3, k("contractor"));
+  t("Dormant accounts detected", k("dormant") >= 25, k("dormant"));
+  t("Post-termination login raised as Critical", E.findings.some(function (f) { return f.kind === "leaver" && /AFTER/.test(f.detail) && f.sev === "Critical"; }));
+  t("Movers keep old-department access (flagged)", E.findings.some(function (f) { return f.kind === "mismatch" && /Moved from/.test(f.detail); }));
+  t("Service account owned by a leaver detected", k("svcowner") >= 1, k("svcowner"));
+
+  /* reviewer assignment */
+  var bad = E.validateAssignments();
+  t("Every assignment passes all rules (0 violations)", bad.length === 0, bad.length + " violations");
+  t("Nobody reviews their own access", E.accounts.every(function (a) {
+    var x = E.assignments[a.id];
+    return x.primary.id && x.primary.id !== a.holder && (!x.secondary || x.secondary.id !== a.holder);
+  }));
+  t("Every account has a primary reviewer", E.accounts.every(function (a) { return !!E.assignments[a.id].primary.id; }));
+  t("Reviewer always ranks above the holder", E.accounts.every(function (a) {
+    var x = E.assignments[a.id];
+    return E.people[x.primary.id].level > E.people[a.holder].level && (!x.secondary || E.people[x.secondary.id].level > E.people[a.holder].level);
+  }));
+  t("All Blackline and Kyriba accounts get a second reviewer", E.accounts.filter(function (a) { return a.sys === "BL" || a.sys === "KY"; }).every(function (a) { return E.assignments[a.id].dual && E.assignments[a.id].secondary.id; }));
+  t("Second reviewer differs from primary", E.accounts.every(function (a) { var x = E.assignments[a.id]; return !x.secondary || x.secondary.id !== x.primary.id; }));
+  t("Reviewers are never admins of the system they review", E.accounts.every(function (a) {
+    var x = E.assignments[a.id];
+    return !E.isAdminIn(x.primary.id, a.sys) && (!x.secondary || !E.isAdminIn(x.secondary.id, a.sys));
+  }));
+  t("Reviewer is never a leaver", E.accounts.every(function (a) { var x = E.assignments[a.id]; return E.people[x.primary.id].status === "Active" && (!x.secondary || E.people[x.secondary.id].status === "Active"); }));
+  t("A naive HR-manager assignment would have broken rules (proves the engine matters)", E.naive().length > 10, E.naive().length + " naive violations");
+
+  /* guard */
+  var gh = E.accounts.filter(function (a) { return a.sys === "GH" && a.type === "Named" && a.person && E.people[a.person].status === "Active" && E.people[a.person].level === 1; })[0];
+  var gm = E.people[gh.holder].managerId;
+  t("Guard blocks self-review", !!E.checkReviewer(gh.id, gh.holder, "primary").hard);
+  var sub = E.accounts.filter(function (a) { return a.person && E.people[a.person].level === 1 && E.people[a.person].status === "Active"; })[3];
+  t("Guard blocks a subordinate reviewing their boss", !!E.checkReviewer(E.acctsOf(E.people[gh.holder].managerId)[0] ? E.acctsOf(E.people[gh.holder].managerId)[0].id : gh.id, gh.holder, "primary").hard);
+  var leaver = Object.keys(E.people).filter(function (id) { return E.people[id].status === "Terminated" && E.people[id].level >= 3; })[0];
+  t("Guard blocks a leaver as reviewer", !!E.checkReviewer(gh.id, leaver, "primary").hard);
+  var admin = Object.keys(E.people).filter(function (id) { return E.isAdminIn(id, "GH") && E.people[id].status === "Active"; })[0];
+  var ghAcct = E.accounts.filter(function (a) { return a.sys === "GH" && a.holder !== admin && E.people[a.holder].level < E.people[admin].level; })[0];
+  t("Guard blocks a GitHub org owner as reviewer of GitHub access", /Administers/.test(E.checkReviewer(ghAcct.id, admin, "primary").hard || ""));
+
+  /* exceptions */
+  var ex = E.data.exceptions;
+  var audits = ex.map(function (e) { return E.exceptionAudit(e); });
+  t("Seeded register has 7 exceptions", ex.length === 7);
+  t("Register contains one expired exception still on the books", audits.filter(function (a) { return a.status === "Expired"; }).length === 1);
+  t("Register contains one exception whose approver does not outrank the reviewer", audits.filter(function (a) { return !a.checks[0].ok; }).length === 1);
+  t("Compliant exceptions pass every check", audits.filter(function (a) { return a.status === "Active"; }).length === 5, audits.map(function (a) { return a.status; }).join(","));
+  var f4 = E.findings.filter(function (f) { return f.ruleId === "R04"; })[0];
+  var revId = E.assignments[f4.accountIds[0]].primary.id;
+  var cands = E.approverCandidates(f4, revId);
+  t("Approver candidates: nobody at or below reviewer level is eligible", cands.every(function (c) { return !c.ok || c.p.level > E.people[revId].level; }));
+  t("Critical finding needs VP level or higher", cands.every(function (c) { return !c.ok || c.p.level >= 6; }));
+  t("Approvers must sit in the holder's or reviewer's management line", cands.every(function (c) {
+    if (!c.ok) return true;
+    var line = E.chain(f4.holderId).concat(E.chain(revId)).map(function (p) { return p.id; });
+    return line.indexOf(c.p.id) >= 0;
+  }));
+  t("An unrelated executive is refused as approver", cands.some(function (c) { return !c.ok && c.p.level >= 6 && /management line/.test(c.why.join(" ")); }));
+  t("Counts agree with the independent Python check (tools/validate_data.py)",
+    k("leaver") === 17 && k("contractor") === 3 && k("dormant") === 33 && k("mismatch") === 14 && k("generic") === 4 && k("svcowner") === 1 && k("noticket") === 16 && k("sod") === 38,
+    "leaver " + k("leaver") + ", dormant " + k("dormant") + ", sod " + k("sod"));
+  t("Leaver findings cannot be excepted", E.findings.filter(function (f) { return f.kind === "leaver"; }).every(function (f) { return !f.exceptable; }));
+  t("Exception max duration is one quarter for Critical", E.limits(f4).maxDays === 90 && E.limits(f4).minControls === 2);
+
+  /* retention */
+  var r = E.retention("2026-09-30", 7);
+  t("Retention: 7 years from review date", r.minUntil === "2033-09-30");
+  t("Retention: policy runs from fiscal year end", r.policyUntil === "2033-12-31");
+
+  /* zip structure */
+  var z = U.makeZip([{name: "a.txt", data: "hello"}, {name: "b/c.csv", data: "x,y\n1,2\n"}]);
+  t("ZIP builder returns a blob of the expected size", z.size === (30 + 5 + 5) + (30 + 7 + 8) + (46 + 5) + (46 + 7) + 22, z.size);
+
+  function summary() {
+    document.getElementById("sum").textContent = pass + " passed, " + fail + " failed";
+    document.getElementById("sum").className = fail ? "bad" : "ok";
+    document.title = (fail ? "FAIL " : "OK ") + pass + "/" + (pass + fail);
+  }
+  if (!(window.crypto && crypto.subtle)) summary();
+})();
+</script>
+</body>
+</html>
